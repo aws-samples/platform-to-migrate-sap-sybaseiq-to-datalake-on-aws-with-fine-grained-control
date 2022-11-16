@@ -1,0 +1,5 @@
+{
+    "JDBC_URL": "jdbc:postgresql://test-migration.cbdhts1o3ncu.us-east-1.rds.amazonaws.com:5432/postgres",
+    "SUFIX_JDBC_URL": "?user={secret['user']}&password={secret['password']}",
+    "DRIVER": "option('driver','org.postgresql.Driver')"
+}

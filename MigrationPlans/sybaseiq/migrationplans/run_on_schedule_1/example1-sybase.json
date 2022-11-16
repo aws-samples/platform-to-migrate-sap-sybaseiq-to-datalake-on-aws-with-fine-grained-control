@@ -1,0 +1,42 @@
+{
+    "SourceName": "sybaseiq",
+    "SourceDatabase": "iqdemo",
+    "SourceSchema": "dba",
+    "Active": true,
+    "SequentialMultipleParts": true,
+    "Jobs": [
+        {
+            "SourceTable": "tb_tableau_superstore",
+            "Query": "SELECT * FROM iqdemo.dba.tb_tableau_superstore WHERE [Row ID] <= 4997",
+            "ExpectedAmountOfRecords": 4997,
+            "NumPartitions": 8,
+            "LowerBound": "1",
+            "UpperBound": "4997",
+            "ColumnForPartitioningOnS3": "order_date",
+            "ColumnForPartitioningOnSpark": "Row ID",
+            "JobName": "sybaseiq_extractor",
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 3,
+            "MigrationPart": 1,
+            "JDBCConnectionString": "jdbc:sybase:Tds:[IP_ADDRESS]:2638?ServiceName=iqdemo",
+            "CredentialsSecretArn": "arn:aws:secretsmanager:us-east-1:[ACCOUNT_NUMBER]:secret:test/databases/sybase-m0INkQ"
+        },
+        {
+            "SourceTable": "tb_tableau_superstore",
+            "Query": "SELECT * FROM iqdemo.dba.tb_tableau_superstore WHERE [Row ID] > 4997",
+            "ExpectedAmountOfRecords": 4997,
+            "NumPartitions": 8,
+            "LowerBound": "4998",
+            "UpperBound": "9994",
+            "ColumnForPartitioningOnS3": "order_date",
+            "ColumnForPartitioningOnSpark": "Row ID",
+            "JobName": "sybaseiq_extractor",
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 3,
+            "MigrationPart": 2,
+            "JDBCConnectionString": "jdbc:sybase:Tds:172.31.66.14:2638?ServiceName=iqdemo",
+            "CredentialsSecretArn": "arn:aws:secretsmanager:us-east-1:[ACCOUNT_NUMBER]:secret:test/databases/sybase-m0INkQ"
+        }
+    ]
+    
+}

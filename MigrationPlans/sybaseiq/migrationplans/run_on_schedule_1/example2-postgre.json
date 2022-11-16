@@ -1,0 +1,42 @@
+{
+    "SourceName": "postgres",
+    "SourceDatabase": "postgres",
+    "SourceSchema": "transactions",
+    "Active": true,
+    "SequentialMultipleParts": true,
+    "Jobs": [
+        {
+            "SourceTable": "tb_agg_sales",
+            "Query": "SELECT * FROM transactions.tb_agg_sales WHERE reference_date BETWEEN '2010-01-01' AND '2016-01-01'",
+            "ExpectedAmountOfRecords": 1096000,
+            "NumPartitions": 20,
+            "LowerBound": "2010-01-01",
+            "UpperBound": "2016-01-01",
+            "ColumnForPartitioningOnS3": "id_branch",
+            "ColumnForPartitioningOnSpark": "reference_date",
+            "JobName": "postgres_extractor",
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 11,
+            "MigrationPart": 1,
+            "JDBCConnectionString": "jdbc:postgresql:",
+            "CredentialsSecretArn": "arn:aws:secretsmanager:us-east-1:[ACCOUNT_NUMBER]:secret:test/databases/postgre-3e2rLm"
+        },
+        {
+            "SourceTable": "tb_agg_sales",
+            "Query": "SELECT * FROM transactions.tb_agg_sales WHERE reference_date BETWEEN '2016-01-02' AND '2021-12-31'",
+            "ExpectedAmountOfRecords": 1095500,
+            "NumPartitions": 20,
+            "LowerBound": "2016-01-02",
+            "UpperBound": "2021-12-31",
+            "ColumnForPartitioningOnS3": "id_branch",
+            "ColumnForPartitioningOnSpark": "reference_date",
+            "JobName": "postgres_extractor",
+            "WorkerType": "G.1X",
+            "NumberOfWorkers": 11,
+            "MigrationPart": 2,
+            "JDBCConnectionString": "jdbc:postgresql:",
+            "CredentialsSecretArn": "arn:aws:secretsmanager:us-east-1:[ACCOUNT_NUMBER]:secret:test/databases/postgre-3e2rLm"
+        }
+    ]
+    
+}

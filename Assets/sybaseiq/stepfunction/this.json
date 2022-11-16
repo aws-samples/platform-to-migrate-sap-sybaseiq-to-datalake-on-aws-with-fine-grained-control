@@ -1,0 +1,354 @@
+{
+  "Comment": "This state machine is responsible for Starting the Glue Job to migrate the on premises SybaseIQ and then monitor it. If it finishes with success then the Glue Crawler is started.  ",
+  "StartAt": "Glue Extractor Start",
+  "States": {
+    "Glue Extractor Start": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun",
+      "Parameters": {
+        "JobName.$": "$.JobName",
+        "WorkerType.$": "$.WorkerType",
+        "NumberOfWorkers.$": "$.NumberOfWorkers",
+        "Arguments": {
+          "--job-bookmark-option": "job-bookmark-disable",
+          "--SourceName.$": "$.SourceName",
+          "--SourceDatabase.$": "$.SourceDatabase",
+          "--SourceSchema.$": "$.SourceSchema",
+          "--SourceTable.$": "$.SourceTable",
+          "--Query.$": "$.Query",
+          "--NumPartitions.$": "$.NumPartitions",
+          "--LowerBound.$": "$.LowerBound",
+          "--UpperBound.$": "$.UpperBound",
+          "--ExecutionHashId.$": "$.ExecutionHashId",
+          "--HistoricalDwOnPremiseBucket.$": "$.HistoricalDwOnPremiseBucket",
+          "--HistoricalExtractionTable.$": "$.HistoricalExtractionTable",
+          "--ColumnForPartitioningOnS3.$": "$.ColumnForPartitioningOnS3",
+          "--ColumnForPartitioningOnSpark.$": "$.ColumnForPartitioningOnSpark",
+          "--CredentialsSecretArn.$": "$.CredentialsSecretArn",
+          "--JDBCConnectionString.$": "$.JDBCConnectionString"
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PostProcessFail"
+        }
+      ],
+      "Next": "DynamoDB Update GlueJobRunId",
+      "ResultPath": "$.Output",
+      "ResultSelector": {
+        "JobRunId.$": "$.JobRunId",
+        "JobName.$": "$.JobName"
+      }
+    },
+    "DynamoDB Update GlueJobRunId": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName.$": "$.HistoricalExtractionTable",
+        "Key": {
+          "ExecutionHashId": {
+            "S.$": "$.ExecutionHashId"
+          },
+          "SourceTable": {
+            "S.$": "$.SourceTable"
+          }
+        },
+        "UpdateExpression": "set GlueJobRunId = :myValueRef",
+        "ExpressionAttributeValues": {
+          ":myValueRef": {
+            "S.$": "$.Output.JobRunId"
+          }
+        }
+      },
+      "Next": "GetJobRun",
+      "ResultPath": null
+    },
+    "GetJobRun": {
+      "Type": "Task",
+      "Parameters": {
+        "JobName.$": "$.Output.JobName",
+        "RunId.$": "$.Output.JobRunId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getJobRun",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PostProcessFail"
+        }
+      ],
+      "Next": "Choice",
+      "ResultPath": "$.Output",
+      "ResultSelector": {
+        "JobRunId.$": "$.JobRun.Id",
+        "JobName.$": "$.JobRun.JobName",
+        "JobRunState.$": "$.JobRun.JobRunState",
+        "ExecutionTime.$": "$.JobRun.ExecutionTime",
+        "StartedOn.$": "$.JobRun.StartedOn",
+        "ExecutionHashId.$": "$.JobRun.Arguments.--ExecutionHashId",
+        "SourceTable.$": "$.JobRun.Arguments.--SourceTable"
+      }
+    },
+    "Choice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.Output.JobRunState",
+              "StringEquals": "FAILED"
+            },
+            {
+              "Variable": "$.Output.JobRunState",
+              "StringEquals": "ERROR"
+            },
+            {
+              "Variable": "$.Output.JobRunState",
+              "StringEquals": "TIMEOUT"
+            }
+          ],
+          "Next": "GetJobRunError"
+        },
+        {
+          "Variable": "$.Output.JobRunState",
+          "StringEquals": "SUCCEEDED",
+          "Next": "DynamoDB UpdateItem"
+        },
+        {
+          "Variable": "$.Output.JobRunState",
+          "StringEquals": "STOPPED",
+          "Next": "DynamoDB Update Stopped Job"
+        }
+      ],
+      "Default": "Wait"
+    },
+    "DynamoDB Update Stopped Job": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName.$": "$.HistoricalExtractionTable",
+        "Key": {
+          "ExecutionHashId": {
+            "S.$": "$.ExecutionHashId"
+          },
+          "SourceTable": {
+            "S.$": "$.SourceTable"
+          }
+        },
+        "UpdateExpression": "set GlueJobFinalStatus = :v1",
+        "ExpressionAttributeValues": {
+          ":v1": {
+            "S.$": "$.Output.JobRunState"
+          }
+        }
+      },
+      "Next": "ChoiceSequentialMultipleParts2",
+      "ResultPath": null
+    },
+    "DynamoDB UpdateItem": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName.$": "$.HistoricalExtractionTable",
+        "Key": {
+          "ExecutionHashId": {
+            "S.$": "$.ExecutionHashId"
+          },
+          "SourceTable": {
+            "S.$": "$.SourceTable"
+          }
+        },
+        "UpdateExpression": "set GlueJobFinalStatus = :v1, ExecutionTime = :v2",
+        "ExpressionAttributeValues": {
+          ":v1": {
+            "S.$": "$.Output.JobRunState"
+          },
+          ":v2": {
+            "N.$": "States.Format('{}',$.Output.ExecutionTime)"
+          }
+        }
+      },
+      "Next": "ChoiceSequentialMultipleParts",
+      "ResultPath": null
+    },
+    "ChoiceSequentialMultipleParts": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.SequentialMultipleParts",
+          "BooleanEquals": true,
+          "Next": "GetsNextJob"
+        }
+      ],
+      "Default": "PostProcessSuccess"
+    },
+    "PostProcessSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${lambda_postprocess_arn}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Success",
+      "ResultPath": null
+    },
+    "GetsNextJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${lambda_routing_arn}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "PostProcessSuccess",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "PostProcessSuccess"
+        }
+      ],
+      "ResultPath": null
+    },
+    "GetJobRunError": {
+      "Type": "Task",
+      "Next": "DynamoDB Update JobRunFailed",
+      "Parameters": {
+        "JobName.$": "$.Output.JobName",
+        "RunId.$": "$.Output.JobRunId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:glue:getJobRun",
+      "ResultSelector": {
+        "JobRunState.$": "$.JobRun.JobRunState",
+        "ErrorMessage.$": "$.JobRun.ErrorMessage",
+        "JobRunId.$": "$.JobRun.Id",
+        "JobName.$": "$.JobRun.JobName",
+        "ExecutionTime.$": "$.JobRun.ExecutionTime",
+        "StartedOn.$": "$.JobRun.StartedOn",
+        "ExecutionHashId.$": "$.JobRun.Arguments.--ExecutionHashId",
+        "SourceTable.$": "$.JobRun.Arguments.--SourceTable"
+      },
+      "ResultPath": "$.Output"
+    },
+    "DynamoDB Update JobRunFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName.$": "$.HistoricalExtractionTable",
+        "Key": {
+          "ExecutionHashId": {
+            "S.$": "$.ExecutionHashId"
+          },
+          "SourceTable": {
+            "S.$": "$.SourceTable"
+          }
+        },
+        "UpdateExpression": "set GlueJobFinalStatus = :v1, ErrorMessage = :v2",
+        "ExpressionAttributeValues": {
+          ":v1": {
+            "S.$": "$.Output.JobRunState"
+          },
+          ":v2": {
+            "S.$": "$.Output.ErrorMessage"
+          }
+        }
+      },
+      "Next": "ChoiceSequentialMultipleParts2",
+      "ResultPath": null
+    },
+    "ChoiceSequentialMultipleParts2": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.SequentialMultipleParts",
+          "BooleanEquals": true,
+          "Next": "GetsNextJob2"
+        }
+      ],
+      "Default": "PostProcessFail"
+    },
+    "GetsNextJob2": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${lambda_routing_arn}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "PostProcessFail",
+      "ResultPath": null
+    },
+    "PostProcessFail": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${lambda_postprocess_arn}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Fail",
+      "ResultPath": null
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "GetJobRun"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Fail": {
+      "Type": "Fail"
+    }
+  }
+}

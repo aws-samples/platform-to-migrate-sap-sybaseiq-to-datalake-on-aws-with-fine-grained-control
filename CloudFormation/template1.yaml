@@ -1,0 +1,22 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS CloudFormation Template to create the assets bucket where the codes for lambda e glue must be uploaded.'
+Resources:
+  AssetsBucket:  
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Sub 'assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'     
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Platform
+          Value: SybaseIQ-Migration
+Outputs:
+  AssetsBucket:
+    Value: !Ref AssetsBucket
+    Description: Assets Bucket Name

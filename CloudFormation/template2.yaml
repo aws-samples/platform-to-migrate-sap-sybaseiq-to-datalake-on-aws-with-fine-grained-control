@@ -1,0 +1,730 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS CloudFormation Template to create part of the infrastructure needed to migrate an on-prem SybaseIQ to AWS.
+This template assumes that a connection with the on-prem SybaseIQ has already been established, either via a site-to-site VPN or a direct connect (recommended).'
+Parameters:
+    GlueCatalogDatabase:
+        Description: The name of the Database on Glue Data Catalog where the tables from SybaseIQ should be put
+        Default: "db_dwonprem"
+        Type: String
+        AllowedPattern: "^[a-z0-9_]*$"
+        ConstraintDescription: takes only lowercase letters, numbers, and the underscore character
+    OnPremIPCIDR:
+        Description: 'On premises IP CIDR range'
+        Type: String
+        MinLength: '9'
+        MaxLength: '18'
+        AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+        ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    TagsValue:
+        Description: 'Choose a name for the tag''s value to be attached to the platform''s components. The Key is "Platform"'
+        Default: "DW_Migration"
+        Type: String
+    VPC:
+        Description: 'Choose the VPC for the Glue Connection'
+        Type: AWS::EC2::VPC::Id
+    Subnet:
+        Description: 'Choose the Private Subnet for the Glue Connection'
+        Type: AWS::EC2::Subnet::Id
+    SubnetAvailabilityZone:
+        Description: "Select the subnet's Availability Zone"
+        Type: AWS::EC2::AvailabilityZone::Name
+    Scheduler1:
+        Description: 'Type a CRON expression for the first scheduler'
+        Type: String
+        Default: "cron(0 4 ? * SAT *)"
+    Scheduler2:
+        Description: 'Type a CRON expression for the second scheduler'
+        Type: String
+        Default: "cron(0 4 ? * SUN *)"
+    SNSTopicName:
+        Description: 'Name of the SNS topic that will send an e-mail when an extraction ends'
+        Type: String
+        Default: "SybaseIQ-Migration-Notifications"
+    SNSTopicSubscriber:
+        Description: 'One e-mail to be notified by the pipeline. More e-mails can be added later'
+        Type: String
+        Default: "email@email.com"
+
+######################### RESOURCES ###################################
+Resources:
+
+    #################### IAM
+    ### Managed Policies
+    ReadAccessAssetsBucket:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: ReadAccessAssetsBucket
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - s3:Get*
+                            - s3:ListBucket
+                      Resource:
+                            - !Sub 'arn:aws:s3:::assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'
+                            - !Sub 'arn:aws:s3:::assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/*'
+    DeleteWriteAccessAssetsBucket:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: DeleteWriteAccessAssetsBucket
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - s3:DeleteObject
+                            - s3:PutObject
+                      Resource:
+                            - !Sub 'arn:aws:s3:::assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/*'
+    ReadAccessMigrationPlansBucket:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: ReadAccessMigrationPlansBucket
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - s3:Get*
+                            - s3:ListBucket
+                      Resource:
+                            - !Sub 'arn:aws:s3:::migration-plans-${AWS::AccountId}-${AWS::Region}'
+                            - !Sub 'arn:aws:s3:::migration-plans-${AWS::AccountId}-${AWS::Region}/*'
+    DeleteWriteAccessMigrationPlansBucket:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: DeleteWriteAccessMigrationPlansBucket
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - s3:DeleteObject
+                            - s3:PutObject
+                      Resource:
+                            - !Sub 'arn:aws:s3:::migration-plans-${AWS::AccountId}-${AWS::Region}/*'
+    ReadDeleteWriteAccessOnPremDWBucket:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: ReadDeleteWriteAccessOnPremDWBucket
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - s3:Get*
+                            - s3:ListBucket
+                            - s3:DeleteObject
+                            - s3:PutObject
+                      Resource:
+                            - !Sub 'arn:aws:s3:::on-prem-dw-${AWS::AccountId}-${AWS::Region}'
+                            - !Sub 'arn:aws:s3:::on-prem-dw-${AWS::AccountId}-${AWS::Region}/*'
+    StartAndMonitorGlueJobs:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: StartAndMonitorGlueJobs
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - glue:StartJobRun
+                            - glue:GetJobRun
+                      Resource: 
+                            - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${GlueExtractorJob}"
+                        
+    ReadWriteDynamoDBTable:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: ReadWriteDynamoDBTable
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - dynamodb:PutItem
+                            - dynamodb:UpdateItem
+                            - dynamodb:GetItem
+                      Resource:
+                            - !Sub 'arn:aws:dynamodb:*:*:table/${MigrationDetailsDynamoTable}'
+    InvokeLambdasAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: InvokeLambdasAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - lambda:InvokeFunction
+                      Resource:
+                        - !GetAtt RoutingLambda.Arn
+                        - !GetAtt PostProcessLambda.Arn
+    InvokeRoutingLambdaAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: InvokeRoutingLambdaAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - lambda:InvokeFunction
+                      Resource:
+                            - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:SybaseIQ-migration-${AWS::Region}-Routing'
+    UpdateGlueCatalogAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: UpdateGlueCatalogAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - glue:BatchCreatePartition
+                            - glue:BatchGetPartition
+                            - glue:BatchUpdatePartition
+                            - glue:CreatePartition
+                            - glue:GetPartition
+                            - glue:GetPartitions
+                            - glue:UpdatePartition
+                            - glue:GetPartitionIndexes
+                            - glue:GetSchema
+                            - glue:GetTable
+                            - glue:GetTables
+                            - glue:CreateTable
+                            - glue:UpdateTable
+                      Resource:
+                            - !Sub 'arn:aws:glue:*:*:database/${GlueCatalogDatabase}'
+                            - !Sub 'arn:aws:glue:*:*:table/${GlueCatalogDatabase}/*'
+                            - 'arn:aws:glue:*:*:catalog'
+    UpdateGluePartitionIndex:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: UpdateGluePartitionIndex
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - glue:CreatePartitionIndex
+                            - glue:GetPartitionIndexes
+                            - glue:GetPartitions
+                            - glue:GetTable
+                            - glue:UpdateTable
+                      Resource:
+                            - !Sub 'arn:aws:glue:*:*:table/${GlueCatalogDatabase}/*'
+                            - !Sub 'arn:aws:glue:*:*:database/${GlueCatalogDatabase}'
+                            - 'arn:aws:glue:*:*:catalog'
+
+    StepFunctionStart:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: StepFunctionStart
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - states:StartExecution
+                      Resource: 
+                            - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:SybaseIQ-Migration-StateMachine
+    SNSPublish:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: SNSPublish
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - sns:Publish
+                      Resource: 
+                            - !Ref SNSTopic
+    LogsAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: LogsAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - logs:CreateLogGroup
+                            - logs:CreateLogStream
+                            - logs:PutLogEvents
+                      Resource:
+                            - arn:aws:logs:*:*:*
+    SecretsManagerAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: SecretsManagerAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - secretsmanager:DescribeSecret
+                            - secretsmanager:GetSecretValue
+                            - secretsmanager:ListSecrets
+                            - secretsmanager:ListSecretVersionIds
+                      Resource: '*'
+                      Condition:
+                        { "StringEquals": {"aws:ResourceTag/Platform": !Sub "${TagsValue}"} }   
+    CloudWatchAccess:
+        Type: AWS::IAM::ManagedPolicy
+        Properties:
+            ManagedPolicyName: CloudWatchAccess
+            PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                    - Effect: Allow
+                      Action:
+                            - cloudwatch:Put*
+                      Resource:
+                            - !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:metric-stream/*"
+
+    ######################### Roles
+    StepFunctionRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: SybaseIQStepFunctionRole
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            - 'states.amazonaws.com'
+                    Action:
+                    - 'sts:AssumeRole'
+            ManagedPolicyArns:
+                - !Ref StartAndMonitorGlueJobs
+                - !Ref InvokeLambdasAccess
+                - !Ref ReadWriteDynamoDBTable
+                - !Ref LogsAccess
+                - !Ref CloudWatchAccess
+    RoutingLambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: RoutingLambdaRole
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            - 'lambda.amazonaws.com'
+                    Action:
+                    - 'sts:AssumeRole'
+            ManagedPolicyArns:
+                - !Ref ReadAccessAssetsBucket
+                - !Ref ReadAccessMigrationPlansBucket
+                - !Ref ReadWriteDynamoDBTable
+                - !Ref StepFunctionStart
+                - !Ref LogsAccess
+                - !Ref CloudWatchAccess
+    PostProcessLambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: PostProcessLambdaRole
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            - 'lambda.amazonaws.com'
+                    Action:
+                    - 'sts:AssumeRole'
+            ManagedPolicyArns:
+                - !Ref ReadAccessMigrationPlansBucket
+                - !Ref DeleteWriteAccessMigrationPlansBucket
+                - !Ref ReadWriteDynamoDBTable
+                - !Ref SNSPublish
+                - !Ref InvokeRoutingLambdaAccess
+                - !Ref UpdateGluePartitionIndex
+                - !Ref LogsAccess
+                - !Ref CloudWatchAccess
+    GlueExtractorJobRole:
+        Type: AWS::IAM::Role
+        Properties:
+            MaxSessionDuration: 43200
+            RoleName: GlueExtractorJobRole
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            - 'glue.amazonaws.com'
+                    Action:
+                    - 'sts:AssumeRole'
+            Policies:
+              - PolicyName: GlueConnectionAccess 
+                PolicyDocument:  
+                    Version: "2012-10-17"
+                    Statement:
+                        - Effect: "Allow"
+                          Action: 
+                            - glue:GetConnection
+                            - glue:GetConnections
+                          Resource:
+                            - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${GlueOnPremConnection}"
+                            - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - PolicyName: VPCDescribe 
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                        - Effect: Allow
+                          Action:
+                                - ec2:DescribeSubnets
+                                - ec2:DescribeTags
+                                - ec2:DescribeVpcAttribute
+                                - ec2:DescribeVpcEndpoints
+                                - ec2:DescribeVpcs
+                                - ec2:DescribeStaleSecurityGroups
+                                - ec2:DescribeSecurityGroups
+                                - ec2:DescribeSecurityGroupRules
+                                - ec2:DescribeRouteTables
+                                - ec2:DescribeRegions
+                                - ec2:DescribeDhcpOptions
+                          Resource: '*'
+              - PolicyName: VPCWrite
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                        - Effect: Allow
+                          Action:
+                                - ec2:CreateNetworkInterface
+                                - ec2:DeleteNetworkInterface
+                                - ec2:AttachNetworkInterface
+                                - ec2:CreateTags
+                                - ec2:DeleteTags
+                          Resource:
+                                - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+                                - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:vpc/${VPC}"
+                                - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${Subnet}"
+                                - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${GlueConnectionSecurityGroup}"
+            ManagedPolicyArns:
+                - !Ref ReadAccessAssetsBucket
+                - !Ref ReadAccessMigrationPlansBucket
+                - !Ref DeleteWriteAccessAssetsBucket
+                - !Ref ReadDeleteWriteAccessOnPremDWBucket
+                - !Ref ReadWriteDynamoDBTable
+                - !Ref UpdateGlueCatalogAccess
+                - !Ref LogsAccess
+                - !Ref SecretsManagerAccess
+                - !Ref CloudWatchAccess
+    EventBridgeRole:
+        Type: AWS::IAM::Role
+        Properties:
+            RoleName: EventBridgeRole
+            AssumeRolePolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                -
+                    Effect: Allow
+                    Principal:
+                        Service:
+                            - 'events.amazonaws.com'
+                    Action:
+                    - 'sts:AssumeRole'
+            ManagedPolicyArns:
+                - !Ref InvokeLambdasAccess
+                - !Ref LogsAccess
+                - !Ref CloudWatchAccess
+
+    ################### SECURITY GROUPS
+    GlueConnectionSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupName: GlueConnectionSecurityGroup
+            GroupDescription: allows access from the on-prem IP CIDR block
+            VpcId: !Ref 'VPC'
+            SecurityGroupIngress:
+                - IpProtocol: -1
+                  FromPort: -1
+                  ToPort: -1
+                  CidrIp: !Ref OnPremIPCIDR
+                - IpProtocol: -1
+                  FromPort: -1
+                  ToPort: -1
+                  SourceSecurityGroupName: GlueConnectionSecurityGroup
+            Tags:
+                - Key: Platform
+                  Value: SybaseIQ-Migration
+
+    ################### VPC Endpoints
+    SecretsManagerInterfaceEndpoint:
+        Type: 'AWS::EC2::VPCEndpoint'
+        Properties:
+            VpcEndpointType: Interface
+            PrivateDnsEnabled: true
+            ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+            VpcId: !Ref VPC
+            SubnetIds: 
+                - !Ref Subnet
+            SecurityGroupIds:
+                - !Ref GlueConnectionSecurityGroup
+
+    #################### S3 buckets
+    LandingBucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Sub 'on-prem-dw-${AWS::AccountId}-${AWS::Region}'
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+    BucketPermissionToInvokeLambda:
+        Type: AWS::Lambda::Permission
+        Properties:
+            Action: 'lambda:InvokeFunction'
+            FunctionName: !Ref RoutingLambda
+            Principal: s3.amazonaws.com
+            SourceAccount: !Ref "AWS::AccountId"
+            SourceArn: !Sub "arn:aws:s3:::migration-plans-${AWS::AccountId}-${AWS::Region}"
+    MigrationPlansBucket:
+        Type: AWS::S3::Bucket
+        Properties: 
+            BucketName: !Sub 'migration-plans-${AWS::AccountId}-${AWS::Region}'
+            NotificationConfiguration:
+                LambdaConfigurations:
+                - Event: 's3:ObjectCreated:*'
+                  Function: !GetAtt RoutingLambda.Arn
+                  Filter:
+                    S3Key:
+                        Rules:
+                        - Name: prefix
+                          Value: sybaseiq/migrationplans/run_now/
+                        - Name: suffix
+                          Value: .json
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
+            VersioningConfiguration:
+                Status: Enabled
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+
+    #################### DYNAMODB TABLE
+    MigrationDetailsDynamoTable:
+        Type: AWS::DynamoDB::Table
+        Properties:
+            TableName: "SybaseIQ-Migration-Details"
+            BillingMode: PAY_PER_REQUEST
+            AttributeDefinitions:
+                - AttributeName: ExecutionHashId
+                  AttributeType: S
+                - AttributeName: SourceTable
+                  AttributeType: S
+            KeySchema:
+                - AttributeName: ExecutionHashId
+                  KeyType: HASH
+                - AttributeName: SourceTable
+                  KeyType: RANGE
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+
+    #################### LAMBDAS
+    RoutingLambda:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: "Receives parameter JSON from S3 or Step Function and starts a new extraction"
+            FunctionName: !Sub 'SybaseIQ-migration-${AWS::Region}-Routing'
+            Handler: lambda_function.lambda_handler
+            Role: !GetAtt RoutingLambdaRole.Arn
+            Timeout: 360
+            Runtime: python3.9
+            Environment:
+                Variables:
+                    MigrationStepFunctionArn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:SybaseIQ-Migration-StateMachine'
+                    LandingBucket: !Ref LandingBucket
+                    MigrationDetailsDynamoTable: !Ref MigrationDetailsDynamoTable
+                    MigrationPlansBucket: !Sub 'migration-plans-${AWS::AccountId}-${AWS::Region}'
+            Code:
+                S3Bucket: !Sub 'assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'
+                S3Key: sybaseiq/lambdas/routing/lambda_function.zip
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+    PostProcessLambda:
+        Type: "AWS::Lambda::Function"
+        Properties:
+            Description: "Publishes on SNS, move JSONs on S3 and create partition indexes on Glue"
+            FunctionName: !Sub 'SybaseIQ-migration-${AWS::Region}-PostProcess'
+            Handler: lambda_function.lambda_handler
+            Role: !GetAtt PostProcessLambdaRole.Arn
+            Timeout: 360
+            Runtime: python3.9
+            Environment:
+                Variables:
+                    LandingBucket: !Ref LandingBucket
+                    MigrationDetailsDynamoTable: !Ref MigrationDetailsDynamoTable
+                    MigrationNotificationsTopic: !Ref SNSTopic
+                    MigrationPlansBucket: !Sub 'migration-plans-${AWS::AccountId}-${AWS::Region}'
+                    TargetDatabase: !Ref GlueCatalogDatabase
+            Code:
+                S3Bucket: !Sub 'assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'
+                S3Key: sybaseiq/lambdas/postprocess/lambda_function.zip
+
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+
+    #################### GLUE
+    GlueOnPremConnection:
+        Type: AWS::Glue::Connection
+        Properties:
+            CatalogId: !Ref AWS::AccountId
+            ConnectionInput:
+                ConnectionType: 'NETWORK'
+                Description: 'This connection allows Glue to reach the On-prem SybaseIQ'
+                Name: OnPremGlueConnectionSybaseIQ
+                ConnectionProperties:
+                    ConnectionType: 'NETWORK'
+                    Description: 'This connection allows Glue to reach the On-prem SybaseIQ'
+                    Name: OnPremGlueConnectionSybaseIQ
+                PhysicalConnectionRequirements:
+                    SecurityGroupIdList:
+                        - !Ref GlueConnectionSecurityGroup
+                    SubnetId: !Ref Subnet
+                    AvailabilityZone: !Ref SubnetAvailabilityZone
+    GlueConnectionENI:
+        Type: AWS::EC2::NetworkInterface
+        Properties:
+            Description: ENI for the Glue Network Connection
+            SourceDestCheck: 'false'
+            GroupSet:
+                - !Ref GlueConnectionSecurityGroup
+            SubnetId: !Ref Subnet
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+    GlueExtractorJob:
+        Type: AWS::Glue::Job
+        Properties:
+            Connections:
+                Connections:
+                    - !Ref GlueOnPremConnection
+            Command:
+                Name: glueetl
+                ScriptLocation: !Sub 's3://assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/sybaseiq/glue/extractor/code/sybaseiq_extractor.py'
+            DefaultArguments:
+                {
+                "--job-bookmark-option": job-bookmark-disable,
+                "--enable-glue-datacatalog": "true",
+                "--enable-metrics": "true",
+                "--TargetDatabase": !Ref GlueCatalogDatabase,
+                "--scriptLocation": !Sub 's3://assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/sybaseiq/glue/extractor/code/sybaseiq_extractor.py',
+                "--extra-jars": !Sub 's3://assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/sybaseiq/glue/extractor/jars/jconnect.jar',
+                "--extra-py-files": !Sub 's3://assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}/sybaseiq/glue/extractor/jars/jconnect.jar'
+                }
+            ExecutionProperty:
+                MaxConcurrentRuns: 50
+            MaxRetries: 0
+            Name: sybaseiq_extractor
+            Role: !Ref GlueExtractorJobRole
+            GlueVersion: '3.0'
+            NumberOfWorkers: 3
+            WorkerType: 'G.1X'
+            Tags:
+                {"Platform": !Sub "${TagsValue}"}
+    GlueTargetDatabase:
+        Type: AWS::Glue::Database
+        Properties: 
+            CatalogId: !Ref AWS::AccountId
+            DatabaseInput: 
+                Name: !Ref GlueCatalogDatabase
+
+    #################### STEP FUNCTION
+    OrchestrationStepFunction:
+        Type: AWS::StepFunctions::StateMachine
+        Properties:
+            StateMachineName: SybaseIQ-Migration-StateMachine
+            DefinitionS3Location:
+                Bucket: !Sub 'assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'
+                Key: sybaseiq/stepfunction/this.json
+            DefinitionSubstitutions:
+                lambda_postprocess_arn: !GetAtt PostProcessLambda.Arn
+                lambda_routing_arn: !GetAtt RoutingLambda.Arn
+            RoleArn: !GetAtt StepFunctionRole.Arn
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+    
+    #################### EVENT BRIDGE
+    EventsPermissionToInvokeLambdaEventRule1:
+        Type: AWS::Lambda::Permission
+        Properties:
+            Action: 'lambda:InvokeFunction'
+            FunctionName: !Ref RoutingLambda
+            Principal: events.amazonaws.com
+            SourceAccount: !Ref "AWS::AccountId"
+            SourceArn: !GetAtt EventRule1.Arn
+    EventsPermissionToInvokeLambdaEventRule2:
+        Type: AWS::Lambda::Permission
+        Properties:
+            Action: 'lambda:InvokeFunction'
+            FunctionName: !Ref RoutingLambda
+            Principal: events.amazonaws.com
+            SourceAccount: !Ref "AWS::AccountId"
+            SourceArn: !GetAtt EventRule2.Arn
+
+    EventRule1:
+        Type: "AWS::Events::Rule"
+        Properties:
+            ScheduleExpression: !Ref Scheduler1
+            State: "ENABLED"
+            RoleArn: !GetAtt EventBridgeRole.Arn
+            Targets:
+                - Arn: !GetAtt RoutingLambda.Arn
+                  Id: "Routing_Lambda"
+                  Input: '{"source":"eventbridge", "schedule_number": 1}'
+                  
+    EventRule2:
+        Type: "AWS::Events::Rule"
+        Properties:
+            ScheduleExpression: !Ref Scheduler2
+            State: "ENABLED"
+            RoleArn: !GetAtt EventBridgeRole.Arn
+            Targets:
+                - Arn: !GetAtt RoutingLambda.Arn
+                  Id: "Routing_Lambda"
+                  Input: '{"source":"eventbridge", "schedule_number": 2}'
+                  
+
+#################### SNS
+    SNSTopic: 
+        Type: AWS::SNS::Topic
+        Properties: 
+            TopicName: !Ref SNSTopicName
+            Subscription: 
+                - Endpoint: !Ref SNSTopicSubscriber
+                  Protocol: "email"
+            Tags:
+                - Key: Platform
+                  Value: !Ref TagsValue
+          
+######################### OUTPUTS ###################################
+Outputs:
+    AssetsBucketName:
+        Value: !Sub 'assets-sybaseiq-migration-${AWS::AccountId}-${AWS::Region}'
+        Description: Assets Bucket Name
