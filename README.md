@@ -9,7 +9,7 @@ The main services used are: AWS Glue, Amazon S3, AWS Step Functions, Amazon Even
 2. An AWS Lambda Function that takes the JSON parameters on S3 and starts an AWS Step Functions state machine. 
 3. Amazon S3 bucket where the JSON parameters for each extraction must be put. The JSON files located on the run_on_schedule prefixes will start extractions at the times defined on Amazon EventBridge and the files on the prefix run_now will trigger an extraction right away by invoking the routing AWS Lambda Function through S3 Event Notifications.
 4. An AWS Step Functions state machine to orchestrate the extraction. This state machine initiates the Glue Job and monitors it to catch errors and to start the next extraction (if any).
-5. An Amazon Simple Notification Service (SNS) topic that sends an e-mail every time an extraction ends, either successfully or not.
+5. An AWS Glue Job responsible for pulling the data from SAP SybaseIQ. This job also partitions, cleans (possible duplicates and blank spaces in the beginning and end of string columns), catalogs, and stores the data on Amazon S3. 
 6. DataLake Amazon S3 bucket where all the files from the migration are stored in .parquet.
 7. AWS Glue Catalog where the tables migrated are cataloged, allowing the use of services such as Amazon Athena and Amazon Redshift Spectrum to make queries on these migrated tables.
 8. Amazon DynamoDB table with metadata about all the extractions.
