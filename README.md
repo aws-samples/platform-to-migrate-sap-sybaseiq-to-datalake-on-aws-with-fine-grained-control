@@ -121,10 +121,11 @@ Also, to have less impact on the database, it is possible to create a JSON to ru
 5. Zip the files with the lambda codes and leave them in the same path with the same name of the .py files. You will create these two files:
     - Assets/sybaseiq/lambdas/routing/lambda_function.zip
     - Assets/sybaseiq/lambdas/postprocess/lambda_function.zip
-5. Drag and drop the */Assets/sybaseiq/* folder into the bucket that has been created. It is important to drag and drop in order to keep the folder structure
+5. Drag and drop the *sybaseiq/* folder into the bucket that has been created. This folder is inside the *Assets* folder. It is important to drag and drop in order to keep the folder structure
 6. Run the template2.yaml on the AWS CloudFormation console. Carefully read the descriptions of each parameter that you have to pass to AWS CloudFormation
 7. Go to the AWS Glue job and check if the **Dependent JARs path** is correctly pointing to the jar file you previously downloaded
-8. Create a JSON to test an extraction, go to the *migration-plans* bucket and upload the json into the *run_now* folder. Then check on AWS Step Functions console if the process has started
+8. Drag and drop the *sybaseiq/* folder into the *migration-plans* bucket that has been created. This folder is inside the *MigrationPlans* folder. It is important to drag and drop in order to keep the folder structure
+9. Create a JSON to test an extraction, go to the *migration-plans* bucket and upload the json into the *sybaseiq/migrationplans/run_now* folder. Then check on AWS Step Functions console if the process has started
 
 
 
